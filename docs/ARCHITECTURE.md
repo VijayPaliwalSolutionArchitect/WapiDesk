@@ -1,86 +1,92 @@
 # WapiDesk — Architecture
 
-## System overview
+> Version: v0.1 · 15-11-26 · Author: SHIVAM ITCS (JARVIS)
 
-WapiDesk is a **channel-agnostic AI support agent**. One deterministic brain
-(`SupportAgent`) serves both WhatsApp Cloud API and a web widget, backed by a
-single SQLite store.
+## Layered view
 
 ```
-WhatsApp Cloud API ──┐
-                     ├─▶ routes/channels.py ─▶ SupportAgent ─▶ SQLite Store
-Web widget ──────────┘         │                    │
-                               ▼                    ▼
-                        routes/actions.py     knowledge / orders /
-                        routes/desk.py         bookings / complaints /
-                        routes/ops.py          memory / conversations
+┌────────────────────────────────────────────────────────────────────┐
+│  Channels (entry points)                                           │
+│  • WhatsApp Cloud API webhook  POST/GET /api/v1/webhook/whatsapp  │
+│  • Web live-chat widget        POST /api/v1/chat                   │
+│  • Static demo page            GET /                               │
+├────────────────────────────────────────────────────────────────────┤
+│  API layer (FastAPI routers, app/routes/)                          │
+│  • channels.py  — webhook ingest + chat, returns AgentReply        │
+│  • actions.py   — /api/v1 orders, bookings, complaints             │
+│  • desk.py      — /api/v1/desk conversations, handoff, memory      │
+│  • ops.py       — /api/v1 knowledge, csat, broadcasts, optout,     │
+│                   stats                                            │
+├────────────────────────────────────────────────────────────────────┤
+│  Domain layer                                                      │
+│  • services.py  — SupportAgent: intent routing + reply building    │
+│                   (deterministic brain; optional Dify/RAGFlow      │
+│                   proxy when configured)                           │
+│  • models.py    — Pydantic v2 request/response schemas             │
+├────────────────────────────────────────────────────────────────────┤
+│  Persistence                                                       │
+│  • storage.py   — SQLite Store (one session store for all channels)│
+│  • config.py    — pydantic-settings (env / backend/.env)          │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
-## The brain (`services.py` → `SupportAgent.handle`)
+## Request flow (a WhatsApp message)
 
-One message in → structured reply out:
+```mermaid
+sequenceDiagram
+    participant WA as WhatsApp Cloud API
+    participant API as FastAPI (routes/channels.py)
+    participant AG as SupportAgent (services.py)
+    participant DB as SQLite Store (storage.py)
+    WA->>API: POST /api/v1/webhook/whatsapp (event payload)
+    API->>DB: get/create conversation + append user message
+    API->>AG: reply(customer_id, text, channel)
+    AG->>DB: knowledge lookup, orders/bookings/services, memory, optout check
+    AG-->>API: AgentReply {text, intent, confidence, action, sources}
+    API->>DB: append agent message; flag for QA if confidence < threshold
+    API-->>WA: JSONResponse with the structured reply
+```
 
-1. Resolve/create the conversation session (one store, many channels).
-2. If already handed off → tell the customer to say RESUME.
-3. `score_intent(text)` → (intent, confidence). Deterministic keyword +
-   explicit-phrase classifier; an `ORD-####` id forces `order_status`.
-4. `_dispatch()` routes the intent:
-   - `greeting` / `thanks` → canned polite reply
-   - `order_status` → lookup + write `last_order` memory
-   - `booking` → parse `BOOK <svc> on <date> at <time>` or show availability
-   - `complaint` → create ticket + SLA + write `open_ticket` memory
-   - `human` → handoff (transcript + summary) → status `handed_off`
-   - `broadcast_optout` → opt out of promos
-   - `csat` → prompt for rating
-   - default → **RAG**: `retrieve()` over the seeded knowledge base, answer with
-     citations + confidence; low confidence → flagged for QA
-5. Append the agent reply to the transcript; return `AgentReply`.
+## Components table
 
-## Retrieval (RAG-style, deterministic)
+| Component | File | Responsibility |
+|---|---|---|
+| App factory | `backend/app/main.py` | `build_app()` wires store + agent via `deps.py`, mounts routers, serves `/health`, `/` (static `index.html`), `/docs` |
+| Settings | `backend/app/config.py` | `Settings(BaseSettings)` — env vars + `backend/.env`; DB path, WhatsApp/Dify/RAGFlow/Chatwoot credentials (all empty by default), thresholds |
+| Schemas | `backend/app/models.py` | `MessageIn`, `AgentReply`, `BookingCreate/Out`, `ComplaintCreate/Resolve/Out`, `ConversationOut`, `HandoffReceipt`, `MemoryOut`, `KnowledgeAnswer`, `CsatIn/Out/Stats`, `BroadcastCreate/Out`, `OptOutBody`, `QaFlag`, … |
+| Store | `backend/app/storage.py` | SQLite schema + seed + CRUD: `knowledge`, `orders`, `services`, `bookings`, `complaints`, `conversations`, `memory`, `optout`, `csat`, `broadcast` |
+| Brain | `backend/app/services.py` | `SupportAgent.reply()` — intent detection (order/booking/complaint/handoff/smalltalk/knowledge), confidence score, action payloads, QA flagging, optional external proxies |
+| Dependencies | `backend/app/deps.py` | `get_store`, `get_agent` — singletons per app instance |
+| Routers | `backend/app/routes/*.py` | channels / actions / desk / ops (see API.md) |
 
-`retrieve(query, docs, max_sources)` ranks knowledge docs by token overlap with
-the query — body overlap counts 1, title overlap counts 0.5 — and returns the
-top-N `(similarity, doc)`. `confidence_from_retrieval` = max similarity. Below
-`QA_CONFIDENCE_THRESHOLD` the answer is `flagged_for_qa`.
+## SQLite schema (storage.py)
 
-## Persistence (`storage.py` → `Store`)
+```
+knowledge(id, question, answer, tags, source)
+orders(order_id, customer_id, status, eta, items_json)
+services(id, name, duration_min, price)
+bookings(booking_id, customer_id, service, date, time, status, hours)
+complaints(ticket_id, customer_id, channel, category, message, status, resolution, created_at, updated_at)
+conversations(conversation_id, customer_id, channel, status, created_at, updated_at, messages_json, last_intent, confidence)
+memory(customer_id, key, value, updated_at)
+optout(customer_id, created_at)
+csat(id, conversation_id, rating, comment, created_at)
+broadcast(id, title, body, audience, created_at, sent_count)
+```
 
-Stdlib `sqlite3`, schema created idempotently on boot, seeded from
-`seed_data.py` (knowledge base, orders, services, memory, opt-outs):
+## Key design decisions
 
-| Table | Purpose |
-|---|---|
-| `knowledge` | RAG corpus (id, category, title, body) |
-| `orders` | Order status lookups |
-| `services` | Bookable services |
-| `bookings` | Appointments with cancel support |
-| `complaints` | Tickets with category, priority, SLA timestamp |
-| `conversations` | Per-channel sessions: messages JSON, status, handoff summary |
-| `memory` | Per-customer key/value (with forget control) |
-| `opt_outs` | Broadcast opt-out list |
-| `csat` | Ratings |
-
-## Modules
-
-| File | Responsibility |
-|---|---|
-| `app/main.py` | App factory, router wiring, health |
-| `app/config.py` | `pydantic-settings` — env + `.env` |
-| `app/models.py` | Pydantic I/O schemas |
-| `app/storage.py` | `Store`: schema, seed, all data access |
-| `app/services.py` | `SupportAgent` — intent, retrieval, dispatch |
-| `app/seed_data.py` | Seeded knowledge / orders / services / memory |
-| `app/deps.py` | DI providers |
-| `app/routes/channels.py` | WhatsApp webhook + web chat |
-| `app/routes/actions.py` | Orders, bookings, complaints |
-| `app/routes/desk.py` | Conversations, memory, handoff |
-| `app/routes/ops.py` | Knowledge query, CSAT, broadcasts, stats |
-
-## Design decisions
-
-- **Deterministic brain, zero paid APIs** — runs offline, tests are stable.
-- **One session store, many channels** — same conversation whether WhatsApp or web.
-- **Explicit intents win** — full-phrase overrides and `ORD-####` regex beat keywords.
-- **Grounded answers always carry citations** (FR-W2).
-- **Human handoff carries full context** — transcript + summary, explicit RESUME.
-- **Privacy control** — per-customer memory has a forget/delete endpoint.
+1. **One session store, many channels** (playbook FR-W1): WhatsApp webhook and
+   web chat share the same `Store` and `SupportAgent`, so a conversation started
+   on WhatsApp continues seamlessly on web chat and vice versa.
+2. **Deterministic offline brain**: with no external credentials set, intent
+   routing + seeded knowledge answer everything — reproducible tests, no API
+   keys, no network. Setting `DIFY_*`/`RAGFLOW_*` switches the brain to proxy a
+   real LLM/RAG; `CHATWOOT_*` wires handoff to a real desk.
+3. **SQLite single file** (`backend/data/wapidesk.db` by default): zero-ops,
+   trivial backups, swappable for Postgres later by changing `database_url`.
+4. **Compliance built in**: `optout` table (customers who opted out of
+   broadcasts — checked before any send), `DELETE /api/v1/desk/memory/{id}` for
+   data erasure, QA flags for low-confidence replies.
+5. **No secrets in code**: every credential is an env var with an empty
+   default; `.env` is git-ignored.

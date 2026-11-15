@@ -14,9 +14,14 @@ backend/.venv/
 .env.local
 
 # ---- SQLite database (runtime artifact, recreated at boot) ----
+*.db
+*.sqlite3
 backend/*.db
 backend/*.sqlite3
 backend/data/
+
+# ---- Node / frontend artifacts ----
+node_modules/
 
 # ---- Test / coverage artifacts ----
 .pytest_cache/

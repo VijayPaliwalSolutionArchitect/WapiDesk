@@ -1,141 +1,125 @@
-# WapiDesk — WhatsApp AI Customer-Support Agent
+# WapiDesk — WhatsApp Support Desk
 
-**WapiDesk** is a self-contained AI customer-support agent that runs on the
-WhatsApp Cloud API (and a web widget) with a deterministic, offline "brain" —
-so the whole agent loop is runnable and testable **without any external LLM
-service or paid API**.
+A WhatsApp-first customer support desk: one API brain, many channels, human
+handoff, and ops tooling (knowledge, CSAT, broadcasts, QA flags). Built as a
+portfolio hero project — fully runnable offline with a deterministic in-app
+brain, and ready to proxy to real Dify / RAGFlow / Chatwoot / WhatsApp Cloud
+API when credentials are provided.
 
-It implements the full playbook (Project 6): intent classification, RAG-style
-grounded answers with citations, an action layer (order status, bookings,
-complaint tickets), per-customer memory with a forget control, human handoff
-with transcript + summary, CSAT, and broadcast opt-out.
-
-> **Demo mode:** the deterministic in-app engine handles every message. Point
-> the optional integration env vars (Dify / RAGFlow / Chatwoot / Meta) at real
-> deployments to go live — the webhook still works offline with curl.
+> Version: v0.1 · 15-11-26 · Author: SHIVAM ITCS (JARVIS)
 
 ---
 
-## What's inside
+## What it does
 
-| Slice | Tech | Purpose |
-|---|---|---|
-| `backend/` | Python 3.10+ · FastAPI · Pydantic v2 · `pydantic-settings` · stdlib `sqlite3` · Uvicorn | REST API + deterministic agent brain (`services.py`) + storage (`storage.py`). |
-| `backend/app/routes/` | `channels.py`, `actions.py`, `desk.py`, `ops.py` | WhatsApp webhook + web chat, orders/bookings/complaints, conversations/memory/handoff, knowledge/CSAT/broadcasts. |
-| `backend/tests/` | pytest · httpx TestClient | API + engine tests (runs against `:memory:`). |
-| `docs/` | Markdown | Architecture, API, installation, running, deployment, playbook crosswalk. |
+- **WhatsApp Cloud API webhook** (`POST /api/v1/webhook/whatsapp`) with
+  Meta-style verification (`GET …/whatsapp?hub.mode=hub.verify&hub.challenge=…&hub.verify_token=…`).
+- **Web live-chat** (`POST /api/v1/chat`) that converges on the *same* one
+  session store and the same agent brain as WhatsApp (FR-W1: one brain, many
+  channels).
+- **Deterministic support brain** (`services.py`): intent routing
+  (order status / booking / complaint / human handoff / smalltalk) over a
+  seeded knowledge base, orders, services and bookings — no external calls
+  required.
+- **Actions API** (`/api/v1`): order status lookup, bookings
+  (create/list/cancel), complaints (create/list/get/escalate/resolve).
+- **Human desk** (`/api/v1/desk`): conversation list/detail, handoff to a
+  human agent, resume bot control, per-customer memory (get/forget — GDPR-style).
+- **Ops API** (`/api/v1`): knowledge Q&A with sources, CSAT submit + stats,
+  broadcasts, opt-out list, QA flags for low-confidence conversations.
 
-## Quick start
+## Architecture at a glance
+
+```
+WhatsApp Cloud API ──webhook──┐
+Web chat widget ──/api/v1/chat├─► FastAPI app ─► SupportAgent (brain)
+                               │      │              ├─ deterministic rules + seeded knowledge
+                               │      │              └─ optional proxies: Dify / RAGFlow / Chatwoot
+                               │      ▼
+                               │   SQLite Store (one session store)
+                               │      knowledge · orders · bookings · complaints
+                               │      conversations · memory · csat · optout · broadcasts
+                               └─► /api/v1/desk + /api/v1 ops for humans & dashboards
+```
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full layered view.
+
+## Quickstart
 
 ```bash
+cd C:/Vijay-Projects/WapiDesk
+python -m venv backend/.venv
+source backend/.venv/Scripts/activate          # Windows git-bash
+pip install -r requirements.txt                # requirements live at repo root
 cd backend
-python -m venv .venv
-source .venv/Scripts/activate        # Windows git-bash (or .venv\Scripts\activate)
-pip install -r requirements.txt
-
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --port 8000
 ```
 
-Open:
-
-- Interactive API docs → <http://127.0.0.1:8000/docs>
-- Health → <http://127.0.0.1:8000/api/health>
-
-## Try it end to end (offline demo)
+Then:
 
 ```bash
-# Greet
-curl -X POST http://127.0.0.1:8000/api/v1/chat -H 'Content-Type: application/json' \
-  -d '{"channel":"web","sender":"demo-user","text":"hi"}'
+curl http://127.0.0.1:8000/health
+# {"status": "ok"}
 
-# Grounded knowledge answer (with citations)
-curl -X POST http://127.0.0.1:8000/api/v1/chat -H 'Content-Type: application/json' \
-  -d '{"channel":"web","sender":"demo-user","text":"what is your return policy?"}'
+curl -X POST http://127.0.0.1:8000/api/v1/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"customer_id":"C-100","text":"Where is my order ORD-1001?"}'
 
-# Order status (action)
-curl -X POST http://127.0.0.1:8000/api/v1/chat -H 'Content-Type: application/json' \
-  -d '{"channel":"web","sender":"demo-user","text":"STATUS ORD-1002"}'
-
-# File a complaint → ticket
-curl -X POST http://127.0.0.1:8000/api/v1/chat -H 'Content-Type: application/json' \
-  -d '{"channel":"web","sender":"demo-user","text":"my order arrived damaged, I want a refund"}'
-
-# Human handoff
-curl -X POST http://127.0.0.1:8000/api/v1/chat -H 'Content-Type: application/json' \
-  -d '{"channel":"web","sender":"demo-user","text":"I want to talk to a human agent"}'
-
-# WhatsApp webhook (Meta envelope or plain text)
-curl -X POST http://127.0.0.1:8000/api/v1/webhook/whatsapp -H 'Content-Type: application/json' \
-  -d '{"entry":[{"changes":[{"value":{"messages":[{"text":{"body":"track my order ORD-1001"}}],"contacts":[{"wa_id":"9199999"}]}}]}]}'
+curl http://127.0.0.1:8000/api/v1/knowledge?q=What are your opening hours?
+curl http://127.0.0.1:8000/docs        # interactive Swagger UI
 ```
 
-## API surface
+Run the tests (isolated in-memory DB):
 
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/api/v1/chat` | Send a message → structured `AgentReply` (intent, confidence, sources, action) |
-| `POST` | `/api/v1/webhook/whatsapp` | WhatsApp Cloud API inbound webhook |
-| `GET` | `/api/v1/orders/{id}/status` | Order status lookup |
-| `GET/POST` | `/api/v1/bookings` · `POST /api/v1/bookings/{id}/cancel` | Bookings |
-| `POST` | `/api/v1/complaints` · `POST /api/v1/complaints/{id}/resolve` | Complaint tickets |
-| `GET` | `/api/v1/desk/conversations/{id}` | Conversation + transcript |
-| `GET/PUT/DELETE` | `/api/v1/desk/memory/{customer_id}` | Memory read / write / forget |
-| `POST` | `/api/v1/desk/handoff` | Human takeover (transcript + summary) |
-| `POST` | `/api/v1/knowledge/query` | Grounded RAG answer with citations |
-| `POST` | `/api/v1/csat` | Submit CSAT rating |
-| `POST` | `/api/v1/broadcasts` · opt-out | Broadcast + unsubscribe |
-| `GET` | `/api/v1/stats` | Dashboard aggregates |
-| `GET` | `/api/health` | Liveness |
-
-Full detail in [docs/API.md](docs/API.md).
+```bash
+cd backend && python -m pytest        # all API tests pass
+```
 
 ## Configuration
 
-All settings are env vars (see `backend/app/config.py` and `docs/env-config.md`):
+All settings come from `backend/.env` / environment variables via
+`pydantic-settings` — see [docs/env-config.md](docs/env-config.md) and
+[.env.example](.env.example). **No real secrets in the repo**: WhatsApp,
+Dify, RAGFlow and Chatwoot credentials are empty by default and the app runs
+fully offline. Never commit real tokens.
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `DATABASE_URL` | `backend/data/wapidesk.db` | SQLite path (`:memory:` for tests) |
-| `WHATSAPP_VERIFY_TOKEN` | `""` | Meta webhook verify token |
-| `WHATSAPP_CLOUD_API_TOKEN` | `""` | Meta Cloud API token |
-| `WHATSAPP_PHONE_NUMBER_ID` | `""` | Meta phone number id |
-| `DIFY_AGENT_URL` / `DIFY_AGENT_KEY` | `""` | Optional external agent proxy |
-| `RAGFLOW_URL` / `RAGFLOW_API_KEY` | `""` | Optional external RAG proxy |
-| `CHATWOOT_URL` / tokens | `""` | Optional helpdesk proxy |
-| `KNOWLEDGE_MAX_SOURCES` | `3` | Max citations per answer |
-| `QA_CONFIDENCE_THRESHOLD` | `0.4` | Below this → flagged for QA |
+## Docs
 
-Copy `.env.example` → `.env`.
+| Doc | Contents |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layers, data flow, components, schema |
+| [docs/INSTALLATION.md](docs/INSTALLATION.md) | Prerequisites, venv, dependencies, DB |
+| [docs/RUNNING.md](docs/RUNNING.md) | Start modes, env vars, endpoints, curl walkthrough |
+| [docs/API.md](docs/API.md) | Every REST endpoint with request/response examples |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | VPS, systemd, Docker, Coolify, Caddy TLS, backups, webhook URL setup |
+| [docs/FEATURES.md](docs/FEATURES.md) | Implemented vs planned, mapped to code |
+| [docs/TECH-STACK.md](docs/TECH-STACK.md) | Libraries, versions, rationale |
+| [docs/PLAYBOOK-CROSSWALK.md](docs/PLAYBOOK-CROSSWALK.md) | Playbook requirements → implementation mapping |
+| [docs/env-config.md](docs/env-config.md) | Every environment variable with defaults/examples |
 
-## Repository layout
+## Roadmap
+
+- ◻ Real WhatsApp send (Cloud API token) — webhook receive already works
+- ◻ Dify / RAGFlow proxy for the brain when `DIFY_*` / `RAGFLOW_*` are set
+- ◻ Chatwoot handoff integration (`CHATWOOT_*`)
+- ◻ Auth on the desk/ops APIs
+- ◻ Postgres for multi-node deployments
+
+## Repo layout
 
 ```
 WapiDesk/
+├── .env.example            # all config vars, secrets as placeholders
+├── requirements.txt        # fastapi, uvicorn, pydantic, pydantic-settings, pytest, httpx
 ├── backend/
 │   ├── app/
-│   │   ├── main.py          # FastAPI factory + router wiring
-│   │   ├── config.py        # pydantic-settings (env / .env)
-│   │   ├── models.py        # Pydantic request/response schemas
-│   │   ├── storage.py       # sqlite3 Store: schema + seed + all data access
-│   │   ├── services.py      # SupportAgent — the deterministic brain
-│   │   ├── seed_data.py     # Knowledge base, orders, services, memory seeds
-│   │   ├── deps.py          # DI providers (store, agent)
-│   │   └── routes/          # channels, actions, desk, ops
-│   ├── tests/               # pytest suite
-│   └── requirements.txt
-├── docs/
-└── .env.example
+│   │   ├── main.py         # app factory build_app(), routers, /health, static index
+│   │   ├── config.py       # pydantic-settings Settings (env/.env)
+│   │   ├── models.py       # Pydantic request/response models
+│   │   ├── storage.py      # SQLite Store: schema, seed, CRUD
+│   │   ├── services.py     # SupportAgent brain (deterministic + optional proxies)
+│   │   ├── deps.py         # FastAPI dependencies (get_store, get_agent)
+│   │   └── routes/         # channels.py, actions.py, desk.py, ops.py
+│   └── tests/              # pytest + httpx TestClient (in-memory DB)
+└── frontend/ (empty placeholder) / static index served at /
 ```
-
-## Documentation
-
-- [Architecture](docs/ARCHITECTURE.md)
-- [API Reference](docs/API.md)
-- [Installation](docs/INSTALLATION.md)
-- [Running Locally](docs/RUNNING.md)
-- [Deployment](docs/DEPLOYMENT.md)
-- [Environment Config](docs/env-config.md)
-- [Playbook Crosswalk](docs/PLAYBOOK-CROSSWALK.md)
-
----
-*Reference implementation: deterministic brain, no paid APIs, no stored secrets.*
