@@ -1,0 +1,10 @@
+# WapiDesk - backend runtime dependencies
+# Installed in backend/.venv. Versions support Python 3.14 (cp314 wheels).
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.34
+pydantic>=2.11,<3.0
+pydantic-settings>=2.7
+
+# Development / testing
+pytest>=8.3
+httpx>=0.28

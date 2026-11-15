@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WapiDesk — Support Widget</title>
+    <style>
+        :root { color-scheme: light; }
+        body { font-family: system-ui, "Segoe UI", Roboto, sans-serif; margin: 0; background: #0f172a; }
+        #app { max-width: 420px; margin: 4rem auto; background: #fff; border-radius: 16px;
+               box-shadow: 0 20px 50px rgba(0,0,0,.25); overflow: hidden; }
+        header { background: #10b981; color: #fff; padding: 1rem 1.25rem; font-weight: 700; }
+        #log { height: 380px; overflow-y: auto; padding: 1rem; display: flex; flex-direction: column; gap: .5rem;
+               background: #f8fafc; font-size: 14px; }
+        .msg { max-width: 80%; padding: .5rem .75rem; border-radius: 12px; line-height: 1.4;
+               border: 1px solid #e2e8f0; background: #fff; }
+        .from { align-self: flex-end; background: #dcfce7; border-color: #bbf7d0; }
+        form { display: flex; gap: .5rem; padding: .75rem; border-top: 1px solid #e2e8f0; }
+        input { flex: 1; padding: .6rem .75rem; border: 1px solid #cbd5e1; border-radius: 10px; }
+        button { background: #10b981; border: 0; color: #fff; padding: .6rem 1rem; border-radius: 10px;
+                 font-weight: 600; cursor: pointer; }
+        .hint { font-size: 12px; color: #64748b; padding: .25rem 1.25rem .75rem; }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <header>WapiDesk Support</header>
+        <div id="log"></div>
+        <form id="form">
+            <input id="text" placeholder="Ask us anything… try: what is my order status?" autocomplete="off" />
+            <button type="submit">Send</button>
+        </form>
+        <div class="hint">Try: <em>how long does delivery take</em> · <em>STATUS ORD-1001</em> · <em>book a consult</em> · <em>I need a human</em></div>
+    </div>
+    <script>
+        const log = document.getElementById('log');
+        const form = document.getElementById('form');
+        const text = document.getElementById('text');
+        const chip = document.querySelector('.hint span');
+        const sender = 'web-widget-' + Math.random().toString(36).slice(2, 8);
+        let conversationId = null;
+
+        function bubble(text_, fromUser) {
+            const el = document.createElement('div');
+            el.className = 'msg' + (fromUser ? ' from' : '');
+            el.textContent = text_;
+            log.appendChild(el);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const msg = text.value.trim();
+            if (!msg) return;
+            bubble(msg, true);
+            text.value = '';
+            const body = { channel: 'web', sender, text: msg };
+            if (conversationId) body.conversation_id = conversationId;
+            try {
+                const res = await fetch('/api/v1/chat', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+                });
+                const data = await res.json();
+                conversationId = data.conversation_id;
+                bubble(data.reply, false);
+            } catch (err) {
+                bubble('(network error — is the API running?)', false);
+            }
+        });
+    </script>
+</body>
+</html>

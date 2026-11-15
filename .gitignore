@@ -1,0 +1,31 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# ---- Virtual environment ----
+backend/.venv/
+
+# ---- Environment / secrets ----
+.env
+.env.local
+
+# ---- SQLite database (runtime artifact, recreated at boot) ----
+backend/*.db
+backend/*.sqlite3
+backend/data/
+
+# ---- Test / coverage artifacts ----
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ---- OS / editor cruft ----
+Thumbs.db
+.DS_Store
+.idea/
+.vscode/
+*.swp
